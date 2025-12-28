@@ -37,6 +37,7 @@ import board
 import busio
 from digitalio import DigitalInOut, Direction, Pull
 import adafruit_minimqtt.adafruit_minimqtt as MQTT
+from adafruit_bme280 import basic as adafruit_bme280
 import dphacks_usaqi as USAQI
 
 import adafruit_ahtx0
@@ -71,8 +72,18 @@ LED_G_HIGH_THRESHOLD = os.getenv('LED_G_HIGH_THRESHOLD')
 
 C_TO_F = os.getenv('C_TO_F')
 SMOOTH = os.getenv('SMOOTH')
+try:
+    SEA_LEVEL_PRESSURE = os.getenv('SEA_LEVEL_PRESSURE')
+except:
+    SEA_LEVEL_PRESSURE = 1028.5
 
-VERSION = 1.3
+try:
+    TEMP_SENSOR = os.getenv('TEMP_SENSOR')
+    TEMP_SENSOR_ADDRESS = os.getenv('TEMP_SENSOR_ADDRESS')
+except:
+    TEMP_SENSOR = None
+
+VERSION = 1.4
 
 ### PIN DEFINITIONS ###
 ## PICO LED
@@ -115,7 +126,11 @@ except RuntimeError:
 
 ## Add Qwiic/QT/I2C Sensors below
 if i2c:
-    th = adafruit_ahtx0.AHTx0(i2c) # Comment this line if not using AHT20
+    if TEMP_SENSOR == "bme280":
+        th = adafruit_bme280.Adafruit_BME280_I2C(i2c=i2c, address=TEMP_SENSOR_ADDRESS)
+        th.sea_level_pressure = SEA_LEVEL_PRESSURE
+    else:
+        th = adafruit_ahtx0.AHTx0(i2c) # Comment this line if not using AHT20
 
 avgDict = {}
 
@@ -179,6 +194,10 @@ def read_temp_hum():
             values['temperature'] = round(th.temperature, 2)
         
         values['humidity'] = round(th.relative_humidity, 2)
+
+        if(TEMP_SENSOR == "bme280"):
+            values['pressure'] = round(th.pressure, 2)
+            values['altitude'] = round(th.altitude, 2)
     except Exception:
         print("No temp or humidity sensor")
 

@@ -35,6 +35,12 @@ LED_R_HIGH_THRESHOLD = 999
 #
 # 0 for Celsius, 1 for Fahrenheit
 C_TO_F = 1
+SEA_LEVEL_PRESSURE = 1028.62 # only if using a BME280
+
 # Number of values to smooth average
 # Depending on the sensor, measurements can jump around quite a bit
 SMOOTH = 10
+
+# Type of temp sensor
+TEMP_SENSOR = "bme280"
+TEMP_SENSOR_ADDRESS = 0x76 #BME280 are by default on 0x77 but some are on 0x76 (like the one from AZDelivery)
