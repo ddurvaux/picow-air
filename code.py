@@ -72,6 +72,12 @@ LED_G_HIGH_THRESHOLD = os.getenv('LED_G_HIGH_THRESHOLD')
 
 C_TO_F = os.getenv('C_TO_F')
 SMOOTH = os.getenv('SMOOTH')
+PMS_READ_INTERVAL_MINUTES = os.getenv('PMS_READ_INTERVAL_MINUTES')
+try:
+    PMS_READ_INTERVAL_MINUTES = int(PMS_READ_INTERVAL_MINUTES) if PMS_READ_INTERVAL_MINUTES else 15
+except ValueError:
+    PMS_READ_INTERVAL_MINUTES = 15
+PMS_READ_INTERVAL = PMS_READ_INTERVAL_MINUTES * 60
 try:
     SEA_LEVEL_PRESSURE = os.getenv('SEA_LEVEL_PRESSURE')
 except:
@@ -133,6 +139,8 @@ if i2c:
         th = adafruit_ahtx0.AHTx0(i2c) # Comment this line if not using AHT20
 
 avgDict = {}
+latest_pms_values = {}
+last_pms_read = 0.0
 
 ### SENSOR METHODS ###
 def read_all():
@@ -140,10 +148,22 @@ def read_all():
     Read all sensor data and return a single dictionary
     """
     data = {}
-    data = merge_dicts(read_pms25(), data)
+    data = merge_dicts(get_pms_values(), data)
     data = merge_dicts(read_temp_hum(), data) # Comment this line if not using AHT20
 
     return data
+
+def get_pms_values():
+    """
+    Return cached PMS5003 values and refresh them every PMS_READ_INTERVAL seconds.
+    """
+    global latest_pms_values, last_pms_read
+
+    now = time.monotonic()
+    if not latest_pms_values or (now - last_pms_read) >= PMS_READ_INTERVAL:
+        latest_pms_values = read_pms25()
+        last_pms_read = now
+    return latest_pms_values
 
 def read_pms25():
     """
@@ -307,17 +327,32 @@ def error_message(message1, message2, terminate=1):
         sys.exit()
 
 
-print("Connecting to WiFi...")
-try:
-    wifi.radio.connect(os.getenv('WIFI_SSID'), os.getenv('WIFI_PASSWORD'))
-except ConnectionError as e:
-    error_message("Connection to WiFi was not possible", e)
+def wifi_connect(ssid, password, retries=3, delay=5):
+    """
+    Connect to Wi-Fi and retry if DHCP/session is lost.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"Connecting to WiFi... attempt {attempt}")
+            wifi.radio.connect(ssid, password, timeout=15)
+            if wifi.radio.connected:
+                print("Connected to WiFi")
+                blink(board_led_g, 0.2, 3)
+                print("My MAC addr:", [hex(i) for i in wifi.radio.mac_address])
+                print("My IP address is", wifi.radio.ipv4_address)
+                return True
+        except ConnectionError as e:
+            print("WiFi connection failed:", e)
+        if attempt < retries:
+            print(f"Retrying WiFi in {delay} seconds...")
+            time.sleep(delay)
 
-# Blink the green LED if Wifi is connected
-if(wifi.radio.connected):
-    print("Connected to WiFi")
-    blink(board_led_g, 0.2, 3)
-    
+    return False
+
+
+if not wifi_connect(os.getenv('WIFI_SSID'), os.getenv('WIFI_PASSWORD')):
+    error_message("Connection to WiFi was not possible after retries", 
+                  "Check WiFi credentials and DHCP settings")
 
 # Create socket pool
 pool = socketpool.SocketPool(wifi.radio)
@@ -325,13 +360,6 @@ pool = socketpool.SocketPool(wifi.radio)
 # Create HTML server
 server = Server(pool, '/html', debug=True)
 
-#  prints MAC address to REPL
-print("My MAC addr:", [hex(i) for i in wifi.radio.mac_address])
-
-#  prints IP address to REPL
-print("My IP address is", wifi.radio.ipv4_address)
-
-# Setup MQTT Client
 mqtt_client = MQTT.MQTT(
     broker=MQTT_BROKER,
     port=MQTT_PORT,
@@ -367,7 +395,7 @@ def pmdata_client(request: Request):
     """
     Serve PMS 5003 data as JSON.
     """
-    data = read_pms25()
+    data = get_pms_values()
     return JSONResponse(request, data)
 
 @server.route("/aqi")
@@ -375,7 +403,8 @@ def pmdata_client(request: Request):
     """
     Serve US AQI info as JSON.
     """
-    data = USAQI.pm25_aqi(average_values(avgDict)['pm25 env'])
+    pms_values = get_pms_values()
+    data = USAQI.pm25_aqi(pms_values.get('pm25 env', 0))
     data = USAQI.aqi_info(data)
     return JSONResponse(request, data)
 
@@ -522,10 +551,15 @@ server.start(str(wifi.radio.ipv4_address))
 
 # Get clock reference
 clock = time.monotonic()
+pms_clock = time.monotonic() - PMS_READ_INTERVAL
 values = {}
 
 while True:
     
+    if (pms_clock + PMS_READ_INTERVAL) < time.monotonic():
+        get_pms_values()
+        pms_clock = time.monotonic()
+
     # Take the measurements after every interval
     if (clock + INTERVAL) < time.monotonic():
 
@@ -543,6 +577,13 @@ while True:
         mqtt_msg = merge_dicts(aqi, mqtt_msg)
 
         led_status(mqtt_msg)
+
+        if not wifi.radio.connected:
+            print("WiFi disconnected, trying to reconnect...")
+            if not wifi_connect(os.getenv('WIFI_SSID'), os.getenv('WIFI_PASSWORD')):
+                print("WiFi reconnection failed; waiting before retry")
+                time.sleep(10)
+                continue
 
         if MQTT_ENABLED:
             if not mqtt_client.is_connected():
@@ -565,4 +606,10 @@ while True:
         clock = time.monotonic()
     
     # Process html requests between reading sensor data
-    pool_result = server.poll() # type: ignore
+    try:
+        pool_result = server.poll() # type: ignore
+    except Exception as e:
+        print("Server poll error:", e)
+        if not wifi.radio.connected:
+            print("WiFi disconnected while polling server, reconnecting...")
+            wifi_connect(os.getenv('WIFI_SSID'), os.getenv('WIFI_PASSWORD'))
